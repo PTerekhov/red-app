@@ -1,0 +1,149 @@
+---
+#Namespace
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: vector
+
+---
+#Service Account
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: vector-agent
+  namespace: vector
+
+---
+#ClusterRole
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: vector-agent
+rules:
+- apiGroups: [""]
+  resources: ["pods", "namespaces"]
+  verbs: ["get", "list", "watch"]
+
+---
+#ClusterRoleBinding
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: vector-agent
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: vector-agent
+subjects:
+- kind: ServiceAccount
+  name: vector-agent
+  namespace: vector
+
+---
+#ConfigMap
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: vector-config
+  namespace: vector
+data:
+  vector.yaml: |
+    sources:
+      kubernetes_logs:
+        type: "kubernetes_logs"
+
+      host_logs:
+        type: "file"
+        include: ["/var/log/journal/**/*.log", "/var/log/syslog", "/var/log/dmesg"]
+        read_from: "beginning"
+
+    sinks:
+      opensearch:
+        type: "elasticsearch"
+        inputs: ["kubernetes_logs", "host_logs"]
+        endpoint: "https://opensearch-host:9200"
+        index: "logs-%Y.%m.%d"
+        auth.strategy: "basic"
+        auth.user: "${OPENSEARCH_USERNAME}"
+        auth.password: "${OPENSEARCH_PASSWORD}"
+        tls.verify_certificate: false
+
+---
+#DaemonSet
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: vector
+  namespace: vector
+  labels:
+    app: vector
+spec:
+  selector:
+    matchLabels:
+      app: vector
+  template:
+    metadata:
+      labels:
+        app: vector
+    spec:
+      serviceAccountName: vector-agent
+      tolerations:
+      - key: node-role.kubernetes.io/master
+        effect: NoSchedule
+        operator: Exists
+      - key: node-role.kubernetes.io/control-plane
+        effect: NoSchedule
+        operator: Exists
+      containers:
+      - name: vector
+        image: timberio/vector:0.34.0-distroless-libc
+        env:
+        - name: OPENSEARCH_USERNAME
+          valueFrom:
+            secretKeyRef:
+              name: opensearch-creds
+              key: username
+        - name: OPENSEARCH_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: opensearch-creds
+              key: password
+        resources:
+          limits:
+            memory: 512Mi
+            cpu: 500m
+          requests:
+            memory: 256Mi
+            cpu: 200m
+        volumeMounts:
+        - name: config
+          mountPath: /etc/vector
+          readOnly: true
+        - name: varlog
+          mountPath: /var/log
+          readOnly: true
+        - name: varlibpods
+          mountPath: /var/lib/kubelet/pods
+          readOnly: true
+      volumes:
+      - name: config
+        configMap:
+          name: vector-config
+      - name: varlog
+        hostPath:
+          path: /var/log
+      - name: varlibpods
+        hostPath:
+          path: /var/lib/kubelet/pods
+
+---
+#Secret
+apiVersion: v1
+kind: Secret
+metadata:
+  name: opensearch-creds
+  namespace: vector
+type: Opaque
+data:
+  username: <BASE64_ENCODED_USERNAME>
+  password: <BASE64_ENCODED_PASSWORD>
